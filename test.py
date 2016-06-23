@@ -31,7 +31,39 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[2], "deadbeef")
         self.assertEquals(b[3], "ffffffff")
         self.assertEquals(b[4], "1badcafe")
-        self.assertEquals(b[5], "40e20100")
+        self.assertEquals(b[5], "0001e240")
+
+        # should not raise error
+        ripnotify.rip_packet(rtes*25, seqno, password, auth_type)
+
+        with self.assertRaises(ValueError):
+            ripnotify.rip_packet(rtes*26, seqno, password, auth_type)
+
+    def test_without_auth_md5(self):
+        rtes = [{'route_tag': 1337,
+                 'ip': "222.173.190.239", # 0xdeadbeef
+                 'mask': "255.255.255.255", #0xffffffff
+                 'next_hop': "27.173.202.254", # 0x1badcafe
+                 'metric': 123456}]
+
+        password = None
+        auth_type = "md5"
+        seqno = 56789
+
+        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+
+        b = []
+        for i in range(len(pkt)/4):
+            b.append(byte2hex(pkt[i*4:i*4+4]))
+
+        # header
+        self.assertEquals(b[0], "02020000")
+        # RTE entry
+        self.assertEquals(b[1], "00020539")
+        self.assertEquals(b[2], "deadbeef")
+        self.assertEquals(b[3], "ffffffff")
+        self.assertEquals(b[4], "1badcafe")
+        self.assertEquals(b[5], "0001e240")
 
 
     def test_plain_auth(self):
@@ -64,7 +96,14 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[7],  "deadbeef")
         self.assertEquals(b[8],  "ffffffff")
         self.assertEquals(b[9],  "1badcafe")
-        self.assertEquals(b[10], "40e20100")
+        self.assertEquals(b[10], "0001e240")
+
+
+        # should not raise error
+        ripnotify.rip_packet(rtes*24, seqno, password, auth_type)
+
+        with self.assertRaises(ValueError):
+            ripnotify.rip_packet(rtes*25, seqno, password, auth_type)
 
 
     def test_md5_auth(self):
@@ -97,13 +136,20 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[7],  "deadbeef")
         self.assertEquals(b[8],  "ffffffff")
         self.assertEquals(b[9],  "1badcafe")
-        self.assertEquals(b[10], "40e20100")
+        self.assertEquals(b[10], "0001e240")
         # MD5 hash of packet + password
         self.assertEquals(b[11], "ffff0100")
-        self.assertEquals(b[12], "17bbc7e5")
-        self.assertEquals(b[13], "4e55d34a")
-        self.assertEquals(b[14], "2b58ab85")
-        self.assertEquals(b[15], "8ae6580e")
+        self.assertEquals(b[12], "81b20579")
+        self.assertEquals(b[13], "cc3ec992")
+        self.assertEquals(b[14], "4383badd")
+        self.assertEquals(b[15], "3f111569")
+
+        # should not raise error
+        ripnotify.rip_packet(rtes*23, seqno, password, auth_type)
+
+        with self.assertRaises(ValueError):
+            ripnotify.rip_packet(rtes*24, seqno, password, auth_type)
+
 
     def test_poison(self):
         rtes = [{'route_tag': 1337,
@@ -129,7 +175,7 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[2], "deadbeef")
         self.assertEquals(b[3], "ffffffff")
         self.assertEquals(b[4], "1badcafe")
-        self.assertEquals(b[5], "0f000000")
+        self.assertEquals(b[5], "0000000f")
 
 
 if __name__ == '__main__':
