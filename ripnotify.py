@@ -10,39 +10,47 @@ RIP_COMMAND_RESPONSE  = 2
 RIP_VERSION_2         = 2
 RIP_DEFAULT_PORT      = 520
 RIP_AUTH_MD5          = 3
+RIP_AUTH_PLAIN        = 2
 RIP_MD5_AUTH_LEN      = 16
 RIP_AUTH_TYPE_ID_MD5  = 0x0100
 RIP_ENTRY_MAX_RECORDS = 25
 RIP_METRIC_POISON     = 15
+RIP_HEADER_LEN        = 4
+RIP_RTE_LEN           = 20
 
 def byte2hex(byteStr):
     return ''.join( [ "%02x" % ord( x ) for x in byteStr ] ).strip()
 
 
-def rip_packet(cmd, ver, rtes, seqno, passwd, auth_type):
+def rip_packet(cmd, ver, rtes, seqno, passwd, auth_type="plain"):
     HDR_FORMAT = ">BBH"
     hdr = struct.pack(HDR_FORMAT, cmd, ver, 0)
 
-    if auth_type not in ("md5", "plain"):
+    if passwd is not None and auth_type not in ("md5", "plain"):
         raise ValueError("auth_type must be either 'md5' or 'plain'")
-
-    pkt_len = 0x2c
 
     auth = None
 
-    if auth_type == 'md5':
+    if passwd is not None and auth_type == 'md5':
         AUTH_FORMAT = ">HHHBBIII"
+        # offset is calculated including the md5 header itself
+        pkt_offset = RIP_HEADER_LEN + (len(rtes)+1) * RIP_RTE_LEN
         auth = struct.pack(AUTH_FORMAT,
                            0xffff, # address family
                            RIP_AUTH_MD5, # auth type
-                           pkt_len, # length of RIP packet
+                           pkt_offset, # offset to MD5 auth data
                            0x01, # key_id
                            RIP_MD5_AUTH_LEN, # length of auth packet
                            seqno, # sequence number
                            0x0000, # reserved
                            0x0000) # reserved
-    else:
-        auth = None
+
+    if passwd is not None and auth_type == 'plain':
+        AUTH_FORMAT = ">HH16s"
+        auth = struct.pack(AUTH_FORMAT,
+                           0xffff,
+                           RIP_AUTH_PLAIN,
+                           passwd)
 
     RTE_FORMAT=">HHIIII"
     rte_buf=b""
@@ -63,7 +71,9 @@ def rip_packet(cmd, ver, rtes, seqno, passwd, auth_type):
                                next_hop._ip,
                                socket.htonl(rte['metric']))
 
-    if auth_type == 'md5':
+    md5_footer = None
+
+    if passwd is not None and auth_type == 'md5':
         MD5_AUTH_FORMAT=">HH16s"
         passwd_footer = struct.pack(MD5_AUTH_FORMAT,
                                     0xffff,
