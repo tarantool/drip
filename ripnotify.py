@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import requests
+import time
 
 RIP_COMMAND_RESPONSE = 2
 RIP_VERSION_2 = 2
@@ -157,16 +158,14 @@ def notify_rip(ip_lists, neighbor, route_tag,
                    'mask': "255.255.255.255",
                    'next_hop': next_hop, # 0x1badcafe
                    'metric': metric}
-            print('ip: ' + str(ip))
-            print('next_hop: ' + str(next_hop))
-            print('metric: ' + str(metric))
 
             rtes.append(rte)
 
-        seqno = 1
+        # seconds since epoch
+        # the seqno should be non-decreasing
+        seqno = int(time.time())
         packet = rip_packet(rtes, seqno, passwd, auth_type)
 
-        print('send: %d'% len(packet))
         sock.sendto(packet, (neighbor, RIP_DEFAULT_PORT))
 
 
