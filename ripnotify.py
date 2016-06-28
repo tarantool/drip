@@ -1,18 +1,37 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Set up RIP-based routing for Docker containers
 
-import os
-import struct
-import socket
-import md5
-import docker
+This utility helps to integrate docker into a RIP routing-based
+networks. It includes an implementation of RIP protocol and will
+notify neighbors about created/destroyed containers. Also, it
+will set up routing so that containers on different hosts can
+reach each other.
+
+The implementation is based around python docker library, that
+allows to listen for container events. Based on those events,
+the utility will take appropriate action to notify neighbors or
+patch network configuration. Even if there is an intermittent
+problem with event delivery, the utility will still be able to
+do its work eventually, as there are timer-based threads that
+scan for created/destroyed containers.
+"""
+
 import argparse
 import json
 import logging
-import requests
-import time
-import pyroute2
-import threading
+import md5
+import os
 import signal
+import socket
+import struct
+import threading
+import time
+
+import docker
+import pyroute2
+import requests
+
 
 RIP_COMMAND_RESPONSE = 2
 RIP_VERSION_2 = 2
@@ -33,6 +52,26 @@ RIP_TIMER_DEFAULT_INTERVAL = 10
 
 def rip_packet(rtes, seqno, passwd, auth_type="plain"):
     """ Creates and returns a RIP packet in binary form
+
+    arguments:
+    rtes -- list of Router Table Entries (see below)
+    seqno -- a non-decreasing packet sequence number
+    passwd -- a string password
+    auth_type -- authentication type, either "plain" or "md5"
+
+    Router Table Entries are defined as a dictionary:
+    {'route_tag': <integer route tag>,
+     'ip': <ipv4 address string>,
+     'mask': <ipv4 network mask string>,
+     'next_hop': <ipv4 address string>,
+     'metric': <integer metric>}
+
+    Note:
+    * there is a special "poison" metric (RIP_METRIC_POISON)
+      that allows one to send explicit "deletion" request.
+    * Each RIP packet can't have more than RIP_ENTRY_MAX_RECORDS
+      Router Table Entries. Some of those are consumed by
+      auth info, depending on the auth type you use.
     """
     cmd = RIP_COMMAND_RESPONSE
     ver = RIP_VERSION_2
@@ -48,6 +87,8 @@ def rip_packet(rtes, seqno, passwd, auth_type="plain"):
     permitted_entries = RIP_ENTRY_MAX_RECORDS
 
     if passwd is not None and auth_type == 'md5':
+        # MD5 auth also appends hashed password information to the
+        # end of the packet. Thus, it consumes 2 RTE entries.
         permitted_entries -= 2
         auth_format = ">HHHBBIII"
         # offset is calculated including the md5 header itself
@@ -96,6 +137,11 @@ def rip_packet(rtes, seqno, passwd, auth_type="plain"):
     md5_footer = None
 
     if passwd is not None and auth_type == 'md5':
+        # First, we form a full packet with plaintext password in place
+        # of MD5 digest, then calculate MD5 of the packet, and then
+        # put that digest in place of password. The receiving end, in
+        # order, repeats this procedure and compares result with the
+        # received digest.
         md5_auth_format = ">HH16s"
         passwd_footer = struct.pack(md5_auth_format,
                                     0xffff,
@@ -122,6 +168,7 @@ def rip_packet(rtes, seqno, passwd, auth_type="plain"):
 
 
 def is_ipv4(address):
+    """Returns True if `address` is a valid ipv4 address"""
     try:
         socket.inet_aton(address)
     except socket.error:
@@ -131,6 +178,21 @@ def is_ipv4(address):
 
 
 def get_network_settings(client, network_names):
+    """Collects information about docker networks
+
+    arguments:
+    client -- docker object (docker.Client)
+    network_names -- list of network names for which to collect settings
+
+    returns dictionary with each requested network:
+    {<network name>: {'bridge': <bridge name string>,
+                      'gateway': <ipv4 gateway address string>}
+     ...
+    }
+
+    Note: the user must have explicitly set com.docker.network.bridge.name
+    on the network. Otherwise we won't be able to figure out the bridge name.
+    """
     networks = client.networks()
 
     result = {}
@@ -163,6 +225,23 @@ def get_network_settings(client, network_names):
 
 
 def get_ipdb_by_pid(pid):
+    """Gets a pyroute2 IPDB object for container's network namespace
+
+    This is required as we can't just 'docker exec' network commands
+    in the container. The container itself usually doesn't have enough
+    privileges to manage its network and routing table. Thus, it should
+    be done from outside.
+
+    arguments:
+    pid -- process ID of the container's primary process
+
+    returns:
+    IPDB and NETNS objects
+
+    Note: The caller must destroy IPDB and NETNS properly or there will
+    be a resource leak. NETNS spawns child processes to communicate with
+    network namespace.
+    """
     if not os.path.exists('/var/run/netns'):
         os.mkdir('/var/run/netns')
 
@@ -188,6 +267,16 @@ def get_ipdb_by_pid(pid):
 
 
 def get_container_ips(client, container_id, scanned_networks):
+    """Returns all IP addresses of container that belong to scanned_networks
+
+    arguments:
+    client -- docker object (docker.Client)
+    container_id -- docker container ID
+    scanned_networks -- list of network names to constrain lookup
+
+    returns:
+    list of ipv4 address strings
+    """
     container = client.inspect_container(container_id)
     networks = container['NetworkSettings']['Networks']
 
@@ -202,6 +291,20 @@ def get_container_ips(client, container_id, scanned_networks):
 
 def notify_rip(ip_lists, neighbor, route_tag,
                next_hop, metric, passwd, auth_type):
+    """Send a RIP packet to `neighbor`
+
+    Essentially, it means that we tell the neighbor that
+    we know how to route to those addresses.
+
+    arguments:
+    ip_lists -- list of ipv4 addresses to notify about
+    neighbor -- ipv4 address of RIP neighbor
+    route_tag -- RIP route tag
+    next_hop -- router address (usually our own IP)
+    metric -- distance to destination
+    passwd -- a string password
+    auth_type -- authentication type, either "plain" or "md5"
+    """
 
     ip_set = set()
     for ip_list in ip_lists:
@@ -235,9 +338,30 @@ def notify_rip(ip_lists, neighbor, route_tag,
 
         sock.sendto(packet, (neighbor, RIP_DEFAULT_PORT))
 
+    sock.close()
+
 
 def docker_rip_event_loop(args, container_table, lock):
-    client = docker.Client(base_url='unix:/' + args.socket)
+    """React to docker events and send RIP notifications
+
+    Executed in a separate thread
+
+    arguments:
+    args -- parsed command line arguments. see main()
+    container_table -- dictionary of running containers
+    lock -- mutex to serialize operations
+    """
+
+    docker_socket = args.socket
+    neighbor = args.neighbor
+    route_tag = args.route_tag
+    next_hop = args.next_hop
+    metric = args.metric
+    password = args.password
+    auth_type = args.auth_type
+    networks = args.networks
+
+    client = docker.Client(base_url='unix:/' + docker_socket)
 
     try:
         with lock:
@@ -247,7 +371,7 @@ def docker_rip_event_loop(args, container_table, lock):
                              for container in client.containers()]
 
             for container_id in container_ids:
-                ips = get_container_ips(client, container_id, args.networks)
+                ips = get_container_ips(client, container_id, networks)
                 if not ips:
                     logging.info("Not notifying about '%s', because it" +
                                  "doesn't belong to networks we scan",
@@ -258,8 +382,8 @@ def docker_rip_event_loop(args, container_table, lock):
 
                     container_table[container_id] = ips
                     ip_lists.append(ips)
-            notify_rip(ip_lists, args.neighbor, args.route_tag, args.next_hop,
-                       args.metric, args.password, args.auth_type)
+            notify_rip(ip_lists, neighbor, route_tag, next_hop,
+                       metric, password, auth_type)
     except requests.ConnectionError:
         logging.error("Not sending initial notifications, because connection" +
                       "to Docker failed")
@@ -281,7 +405,7 @@ def docker_rip_event_loop(args, container_table, lock):
                     if event['Action'] == 'start':
                         if container_id not in container_table:
                             ips = get_container_ips(client, container_id,
-                                                    args.networks)
+                                                    networks)
 
                             if not ips:
                                 logging.info(
@@ -293,10 +417,10 @@ def docker_rip_event_loop(args, container_table, lock):
                                              container_id)
 
                                 container_table[container_id] = ips
-                                notify_rip([ips], args.neighbor,
-                                           args.route_tag, args.next_hop,
-                                           args.metric, args.password,
-                                           args.auth_type)
+                                notify_rip([ips], neighbor,
+                                           route_tag, next_hop,
+                                           metric, password,
+                                           auth_type)
 
                     if event['Action'] == 'die':
                         if container_id in container_table:
@@ -308,8 +432,8 @@ def docker_rip_event_loop(args, container_table, lock):
 
                             del container_table[container_id]
                             notify_rip([ips], args.neighbor, args.route_tag,
-                                       args.next_hop, RIP_METRIC_POISON,
-                                       args.password, args.auth_type)
+                                       next_hop, RIP_METRIC_POISON,
+                                       password, auth_type)
             time.sleep(1)
         except requests.ConnectionError:
             logging.error("Connection to docker failed while trying to " +
@@ -324,7 +448,27 @@ def docker_rip_event_loop(args, container_table, lock):
 
 
 def docker_rip_timer_loop(args, container_table, lock):
-    client = docker.Client(base_url='unix:/' + args.socket)
+    """Periodically scan for new containers and send RIP notifications
+
+    This is required if docker_rip_event_loop() misses an event from
+    docker. In this case, we will still eventually find out new
+    containers or the removed ones.
+
+    arguments:
+    args -- parsed command line arguments. see main()
+    container_table -- dictionary of running containers
+    lock -- mutex to serialize operations
+    """
+    docker_socket = args.socket
+    neighbor = args.neighbor
+    route_tag = args.route_tag
+    next_hop = args.next_hop
+    metric = args.metric
+    password = args.password
+    auth_type = args.auth_type
+    networks = args.networks
+
+    client = docker.Client(base_url='unix:/' + docker_socket)
 
     # To not interfere with initial check performed by
     # docker event loop
@@ -339,7 +483,7 @@ def docker_rip_timer_loop(args, container_table, lock):
                 for container_id in container_ids:
                     if container_id not in container_table:
                         ips = get_container_ips(client, container_id,
-                                                args.networks)
+                                                networks)
                         if not ips:
                             logging.info(
                                 "Not notifying about '%s', because it" +
@@ -351,9 +495,9 @@ def docker_rip_timer_loop(args, container_table, lock):
 
                             container_table[container_id] = ips
                             ip_lists.append(ips)
-                notify_rip(ip_lists, args.neighbor, args.route_tag,
-                           args.next_hop, args.metric,
-                           args.password, args.auth_type)
+                notify_rip(ip_lists, neighbor, route_tag,
+                           next_hop, metric,
+                           password, auth_type)
 
                 ip_lists = []
                 for container_id in container_table.copy():
@@ -366,9 +510,9 @@ def docker_rip_timer_loop(args, container_table, lock):
                         del container_table[container_id]
                         ip_lists.append(ips)
 
-                notify_rip(ip_lists, args.neighbor, args.route_tag,
-                           args.next_hop, RIP_METRIC_POISON,
-                           args.password, args.auth_type)
+                notify_rip(ip_lists, neighbor, route_tag,
+                           next_hop, RIP_METRIC_POISON,
+                           password, auth_type)
 
         except requests.ConnectionError:
             logging.error("Connection to docker failed while trying to " +
@@ -382,7 +526,24 @@ def docker_rip_timer_loop(args, container_table, lock):
 
 
 def periodic_rip_notification_loop(args, container_table, lock):
-    while(True):
+    """Periodically send RIP notifications about existing containers
+
+    If we won't send out periodic notifications, the router will 'forget'
+    the routes after a certain timeout.
+
+    arguments:
+    args -- parsed command line arguments. see main()
+    container_table -- dictionary of running containers
+    lock -- mutex to serialize operations
+    """
+    neighbor = args.neighbor
+    route_tag = args.route_tag
+    next_hop = args.next_hop
+    metric = args.metric
+    password = args.password
+    auth_type = args.auth_type
+
+    while True:
         try:
             with lock:
                 ip_lists = []
@@ -390,9 +551,9 @@ def periodic_rip_notification_loop(args, container_table, lock):
                     logging.debug("Sending periodic notification about '%s'",
                                   container_id)
                     ip_lists.append(ips)
-                notify_rip(ip_lists, args.neighbor, args.route_tag,
-                           args.next_hop, args.metric,
-                           args.password, args.auth_type)
+                notify_rip(ip_lists, neighbor, route_tag,
+                           next_hop, metric,
+                           password, auth_type)
         except requests.ConnectionError:
             logging.error("Connection to docker failed while trying to " +
                           "send periodic notifications")
@@ -405,6 +566,19 @@ def periodic_rip_notification_loop(args, container_table, lock):
 
 
 def patch_bridge_ips(network_settings):
+    """Set network mask on host bridges to /32
+
+    We must set netmask to /32 on docker network bridges,
+    because otherwise packets going to containers outside of
+    this host, but residing on the same network, will not
+    be routed outside, due to 'directly attached route'.
+
+    Later on, patch_host_routes() will be called to explicitly
+    create routes to containers on current hosts.
+
+    arguments:
+    network_settings -- settings collected by get_network_settings()
+    """
     bridge_names = [r['bridge'] for r in network_settings.values()]
 
     with pyroute2.IPDB() as ipdb:
@@ -450,6 +624,19 @@ def patch_bridge_ips(network_settings):
 
 
 def patch_container_ip(network_settings, container, ipdb):
+    """Set network mask to /32 in containers
+
+    We must set network mask to /32 in containers, as otherwise
+    packets going to containers outside of this host, but located
+    in the same network, will not go through default gateway,
+    but instead go through 'directly attached route' that is
+    link-local.
+
+    arguments:
+    network_settings -- settings collected by get_network_settings()
+    container -- dictionary created by docker.Client().containers()[i]
+    ipdb -- pyroute2 IPDB attached to container (inside its network namespace)
+    """
     network_names = list(network_settings.keys())
 
     addrs_to_patch = []
@@ -487,6 +674,22 @@ def patch_container_ip(network_settings, container, ipdb):
 
 
 def patch_container_route(network_settings, container, ipdb):
+    """Create route to gateway and default route in container
+
+    As we've set netmask to /32 by patch_container_ip(), we
+    have lost 'directly attached route' to gateway. So, we
+    need to do the following:
+    - Create link-local route to gateway
+    - Create default route via the gateway
+
+    After this, all packets, except those aimed to the gateway,
+    will pass through the gateway.
+
+    arguments:
+    network_settings -- settings collected by get_network_settings()
+    container -- dictionary created by docker.Client().containers()[i]
+    ipdb -- pyroute2 IPDB attached to container (inside its network namespace)
+    """
     network_names = list(network_settings.keys())
 
     routes_to_add = set()
@@ -571,6 +774,12 @@ def patch_container_route(network_settings, container, ipdb):
 
 
 def patch_container_networks(client, network_settings):
+    """Run IP and route patching for all existing containers
+
+    arguments:
+    client -- docker object (docker.Client)
+    network_settings -- settings collected by get_network_settings()
+    """
     network_names = list(network_settings.keys())
 
     for container in client.containers():
@@ -608,6 +817,17 @@ def patch_container_networks(client, network_settings):
 
 
 def patch_host_routes(client, network_settings):
+    """Set up routes to individual containers on the host
+
+    As we've set netmask of host bridges to /32, thus losing
+    'directly attached route', we need individual routing rules
+    for each container. Otherwise traffic to container IPs will
+    try to flow through default gateway.
+
+    arguments:
+    client -- docker object (docker.Client)
+    network_settings -- settings collected by get_network_settings()
+    """
     network_names = list(network_settings.keys())
     bridge_names = [r['bridge'] for r in network_settings.values()]
 
@@ -619,7 +839,6 @@ def patch_host_routes(client, network_settings):
 
             if network_name in network_names:
                 routes_to_add[addr] = network_name
-
 
     with pyroute2.IPDB() as ipdb:
         for route in ipdb.routes:
@@ -654,11 +873,24 @@ def patch_host_routes(client, network_settings):
 
 
 def docker_network_event_loop(args, lock):
-    client = docker.Client(base_url='unix:/' + args.socket)
+    """Listen for new containers and patch their networks
+
+    This will poll docker event endpoint to improve reaction times.
+    Usually the event is fired very shortly after container creation,
+    so the system remains responsive.
+
+    arguments:
+    args -- parsed command line arguments. see main()
+    lock -- mutex to serialize operations
+    """
+    docker_socket = args.socket
+    networks = args.networks
+
+    client = docker.Client(base_url='unix:/' + docker_socket)
 
     try:
         with lock:
-            network_settings = get_network_settings(client, args.networks)
+            network_settings = get_network_settings(client, networks)
             patch_bridge_ips(network_settings)
             patch_host_routes(client, network_settings)
             patch_container_networks(client, network_settings)
@@ -671,7 +903,7 @@ def docker_network_event_loop(args, lock):
 
     while True:
         try:
-            network_settings = get_network_settings(client, args.networks)
+            network_settings = get_network_settings(client, networks)
             for event_str in client.events():
                 with lock:
                     event = json.loads(event_str)
@@ -691,6 +923,18 @@ def docker_network_event_loop(args, lock):
 
 
 def periodic_docker_network_loop(args, lock):
+    """Periodically scan for containers and patch their networks
+
+    This is required if docker_network_event_loop() misses an event
+    from docker. In this case, we will still eventually find out new
+    containers, and configure their network. It may take longer time
+    though.
+
+    arguments:
+    args -- parsed command line arguments. see main()
+    lock -- mutex to serialize operations
+    """
+
     client = docker.Client(base_url='unix:/' + args.socket)
 
     # To not interfere with initial check performed by
@@ -716,6 +960,7 @@ def periodic_docker_network_loop(args, lock):
 
 
 def main():
+    """Start worker threads and wait indefinitely"""
     logging.basicConfig(format='%(levelname)s: %(message)s',
                         level=logging.INFO)
 
