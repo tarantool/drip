@@ -407,47 +407,46 @@ def periodic_rip_notification_loop(args, container_table, lock):
 def patch_bridge_ips(network_settings):
     bridge_names = [r['bridge'] for r in network_settings.values()]
 
-    ipdb = pyroute2.IPDB()
+    with pyroute2.IPDB() as ipdb:
+        # Filter out only relevant interfaces
+        interfaces = {}
+        for interface_id in ipdb.interfaces:
+            interface = ipdb.interfaces[interface_id]
+            if interface.ifname in bridge_names:
+                interfaces[interface['index']] = interface
 
-    # Filter out only relevant interfaces
-    interfaces = {}
-    for interface_id in ipdb.interfaces:
-        interface = ipdb.interfaces[interface_id]
-        if interface.ifname in bridge_names:
-            interfaces[interface['index']] = interface
+        # All relevant interfaces should have netmask /32
+        # so that there is no 'directly connected route'
+        for interface in interfaces.values():
+            ipaddr_set = False
+            for ipaddr in interface.ipaddr:
+                addr = ipaddr[0]
+                mask = ipaddr[1]
 
-    # All relevant interfaces should have netmask /32
-    # so that there is no 'directly connected route'
-    for interface in interfaces.values():
-        ipaddr_set = False
-        for ipaddr in interface.ipaddr:
-            addr = ipaddr[0]
-            mask = ipaddr[1]
+                if is_ipv4(addr):
+                    if mask != 32:
+                        logging.info('Replacing %s/%d with %s/%d on %s',
+                                     addr, mask,
+                                     addr, 32,
+                                     interface.ifname)
+                        interface.del_ip(addr+'/'+str(mask))
+                        interface.add_ip(addr+'/32')
+                        ipaddr_set = True
+                    else:
+                        ipaddr_set = True
 
-            if is_ipv4(addr):
-                if mask != 32:
-                    logging.info('Replacing %s/%d with %s/%d on %s',
-                                 addr, mask,
-                                 addr, 32,
-                                 interface.ifname)
-                    interface.del_ip(addr+'/'+str(mask))
-                    interface.add_ip(addr+'/32')
-                    ipaddr_set = True
-                else:
-                    ipaddr_set = True
+            if not ipaddr_set:
+                bridges = {n['bridge']: n['gateway']
+                           for n in network_settings.values()}
+                addr = bridges[interface.ifname]
+                mask = 32
+                logging.info('Setting %s/%d on %s',
+                             addr, mask,
+                             interface.ifname)
 
-        if not ipaddr_set:
-            bridges = {n['bridge']: n['gateway']
-                       for n in network_settings.values()}
-            addr = bridges[interface.ifname]
-            mask = 32
-            logging.info('Setting %s/%d on %s',
-                         addr, mask,
-                         interface.ifname)
+                interface.add_ip(addr+'/'+str(mask))
 
-            interface.add_ip(addr+'/'+str(mask))
-
-    ipdb.commit()
+        ipdb.commit()
 
 
 def patch_container_ip(network_settings, container, ipdb):
@@ -621,36 +620,37 @@ def patch_host_routes(client, network_settings):
             if network_name in network_names:
                 routes_to_add[addr] = network_name
 
-    ipdb = pyroute2.IPDB()
 
-    for route in ipdb.routes:
-        if route['family'] != socket.AF_INET:
-            continue
+    with pyroute2.IPDB() as ipdb:
+        for route in ipdb.routes:
+            if route['family'] != socket.AF_INET:
+                continue
 
-        dst = route['dst']
-        ifname = ipdb.interfaces[route['oif']].ifname
+            dst = route['dst']
+            ifname = ipdb.interfaces[route['oif']].ifname
 
-        if ifname in bridge_names:
-            dst_addr, dst_mask = dst.split('/')
+            if ifname in bridge_names:
+                dst_addr, dst_mask = dst.split('/')
 
-            if dst_addr in list(routes_to_add.keys()) and \
-               dst_mask == '32' and \
-               ifname == network_settings[routes_to_add[dst_addr]]['bridge']:
-                logging.debug("Keeping existing route '%s' via '%s'",
-                              dst, ifname)
-                del routes_to_add[dst_addr]
-            elif dst_mask == '32' and ifname in bridge_names:
-                logging.info("Removing dangling route '%s' via '%s'",
-                             dst, ifname)
-                del ipdb.routes[{'dst': dst_addr+'/32'}]
+                if dst_addr in list(routes_to_add.keys()) and \
+                   dst_mask == '32' and \
+                   ifname == network_settings[
+                       routes_to_add[dst_addr]]['bridge']:
+                    logging.debug("Keeping existing route '%s' via '%s'",
+                                  dst, ifname)
+                    del routes_to_add[dst_addr]
+                elif dst_mask == '32' and ifname in bridge_names:
+                    logging.info("Removing dangling route '%s' via '%s'",
+                                 dst, ifname)
+                    del ipdb.routes[{'dst': dst_addr+'/32'}]
 
-    for addr, network_name in routes_to_add.items():
-        bridge_name = network_settings[network_name]['bridge']
-        interface_id = ipdb.interfaces[bridge_name]['index']
-        logging.info("Adding route to '%s/32' via '%s'", addr, bridge_name)
-        ipdb.routes.add({'dst': addr+'/32',
-                         'oif': interface_id})
-    ipdb.commit()
+        for addr, network_name in routes_to_add.items():
+            bridge_name = network_settings[network_name]['bridge']
+            interface_id = ipdb.interfaces[bridge_name]['index']
+            logging.info("Adding route to '%s/32' via '%s'", addr, bridge_name)
+            ipdb.routes.add({'dst': addr+'/32',
+                             'oif': interface_id})
+        ipdb.commit()
 
 
 def docker_network_event_loop(args, lock):
