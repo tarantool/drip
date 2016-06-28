@@ -22,7 +22,7 @@ work with standard Docker API.
 As the utility will modify routing, root access is required.
 
 ```bash
-sudo ./ripnotify.py --next-hop <this-hosts-ip-address> --neighbor <rip-server>
+sudo ./drip.py --next-hop <this-hosts-ip-address> --neighbor <rip-server>
 ```
 
 * --next-hop is usually the current host's external IP address, visible to the router

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import unittest
-import ripnotify
+import drip
 
 def byte2hex(byteStr):
     return ''.join( [ "%02x" % ord( x ) for x in byteStr ] ).strip()
@@ -18,7 +18,7 @@ class RIPTest(unittest.TestCase):
         auth_type = None
         seqno = 56789
 
-        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+        pkt = drip.rip_packet(rtes, seqno, password, auth_type)
 
         b = []
         for i in range(len(pkt)/4):
@@ -34,10 +34,10 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[5], "0001e240")
 
         # should not raise error
-        ripnotify.rip_packet(rtes*25, seqno, password, auth_type)
+        drip.rip_packet(rtes*25, seqno, password, auth_type)
 
         with self.assertRaises(ValueError):
-            ripnotify.rip_packet(rtes*26, seqno, password, auth_type)
+            drip.rip_packet(rtes*26, seqno, password, auth_type)
 
     def test_without_auth_md5(self):
         rtes = [{'route_tag': 1337,
@@ -50,7 +50,7 @@ class RIPTest(unittest.TestCase):
         auth_type = "md5"
         seqno = 56789
 
-        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+        pkt = drip.rip_packet(rtes, seqno, password, auth_type)
 
         b = []
         for i in range(len(pkt)/4):
@@ -77,7 +77,7 @@ class RIPTest(unittest.TestCase):
         auth_type = "plain"
         seqno = 56789
 
-        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+        pkt = drip.rip_packet(rtes, seqno, password, auth_type)
 
         b = []
         for i in range(len(pkt)/4):
@@ -100,10 +100,10 @@ class RIPTest(unittest.TestCase):
 
 
         # should not raise error
-        ripnotify.rip_packet(rtes*24, seqno, password, auth_type)
+        drip.rip_packet(rtes*24, seqno, password, auth_type)
 
         with self.assertRaises(ValueError):
-            ripnotify.rip_packet(rtes*25, seqno, password, auth_type)
+            drip.rip_packet(rtes*25, seqno, password, auth_type)
 
 
     def test_md5_auth(self):
@@ -117,7 +117,7 @@ class RIPTest(unittest.TestCase):
         auth_type = "md5"
         seqno = 56789
 
-        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+        pkt = drip.rip_packet(rtes, seqno, password, auth_type)
 
         b = []
         for i in range(len(pkt)/4):
@@ -145,10 +145,10 @@ class RIPTest(unittest.TestCase):
         self.assertEquals(b[15], "3f111569")
 
         # should not raise error
-        ripnotify.rip_packet(rtes*23, seqno, password, auth_type)
+        drip.rip_packet(rtes*23, seqno, password, auth_type)
 
         with self.assertRaises(ValueError):
-            ripnotify.rip_packet(rtes*24, seqno, password, auth_type)
+            drip.rip_packet(rtes*24, seqno, password, auth_type)
 
 
     def test_poison(self):
@@ -156,13 +156,13 @@ class RIPTest(unittest.TestCase):
                  'ip': "222.173.190.239", # 0xdeadbeef
                  'mask': "255.255.255.255", #0xffffffff
                  'next_hop': "27.173.202.254", # 0x1badcafe
-                 'metric': ripnotify.RIP_METRIC_POISON}]
+                 'metric': drip.RIP_METRIC_POISON}]
 
         password = None
         auth_type = None
         seqno = 56789
 
-        pkt = ripnotify.rip_packet(rtes, seqno, password, auth_type)
+        pkt = drip.rip_packet(rtes, seqno, password, auth_type)
 
         b = []
         for i in range(len(pkt)/4):
