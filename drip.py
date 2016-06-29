@@ -216,6 +216,14 @@ def get_network_settings(client, network_names):
                 network['Name'])
             continue
 
+        with pyroute2.IPDB() as ipdb:
+            if bridge not in ipdb.interfaces:
+                logging.error(
+                    "Network '%s' exists, but bridge '%s' doesn't",
+                    network['Name'],
+                    bridge)
+                continue
+
         result[network['Name']] = {
             'bridge': bridge,
             'gateway': gateway
@@ -485,8 +493,8 @@ def docker_rip_timer_loop(args, container_table, lock):
                         ips = get_container_ips(client, container_id,
                                                 networks)
                         if not ips:
-                            logging.info(
-                                "Not notifying about '%s', because it" +
+                            logging.debug(
+                                "Not notifying about '%s', because it " +
                                 "doesn't belong to networks we scan",
                                 container_id)
                         else:
@@ -760,6 +768,8 @@ def patch_container_route(network_settings, container, ipdb):
         ipdb.routes.add({'dst': gateway+'/32',
                          'oif': interfaces[gateway_ifname].index,
                          'scope': 253})  # link-local
+
+    ipdb.commit()
 
     if not default_route_set_up:
         logging.info("Adding default route via '%s' in %s",
