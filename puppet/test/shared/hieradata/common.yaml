@@ -1,0 +1,4 @@
+---
+# comma-separated list of network names
+private::drip::docker_networks: bridge
+private::drip::rip_server: localhost

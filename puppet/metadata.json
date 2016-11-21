@@ -1,0 +1,27 @@
+{
+    "name": "drip",
+    "version": "0.0.1",
+    "author": "Konstantin Nazarov <mail@kn.am>",
+    "license": "BSD",
+    "summary": "RIP-based routing daemon for Docker containers",
+    "project_page": "https://github.com/tarantool/drip",
+    "source": "https://github.com/tarantool/drip",
+    "issues_url": "https://github.com/tarantool/drip/issues",
+    "tags": [],
+    "operatingsystem_support": [
+        {
+            "operatingsystem":"RedHat",
+            "operatingsystemrelease":[ "7.0" ]
+        },
+        {
+            "operatingsystem": "Ubuntu",
+            "operatingsystemrelease": [ "14.04", "16.04" ]
+        }
+    ],
+    "dependencies": [
+        { "name": "puppetlabs/stdlib" },
+        { "name": "puppetlabs/firewall" },
+        { "name": "garethr/docker" }
+    ],
+    "data_provider": "hiera"
+}

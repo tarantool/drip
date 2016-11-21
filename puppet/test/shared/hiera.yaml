@@ -1,0 +1,7 @@
+:hierarchy:
+  - "%{nodename}"
+  - common
+:backends:
+  - yaml
+:yaml:
+  :datadir: /var/lib/hiera
