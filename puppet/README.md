@@ -19,34 +19,26 @@ If you need to run it as a regular systemd service, pull requests are welcome.
 
 ## Usage
 
-The module declares a single role:
+The module declares a single class:
 
 ``` puppet
-include roles::drip
+class { 'drip':
+  $docker_networks => ['bridge'],
+  $rip_server      => undef,
+  $advertise_addr  => undef,
+  $rip_metric      => undef
+}
 ```
 
-It requires that you define one fact:
+* `docker_networks` -- a comma-separated list of docker network names
+(*NB:* not interface names!) that will be scanned for containers.
 
-``` puppet
-next_hop_address: <ip address>
-```
-
-The `next_hop_address` is IP address that will be sent in RIP packets as
+* `advertise_addr` -- IP address that will be sent in RIP packets as
 "next hop". Usually it's the address of current physical node.
 
-Also, it needs 2 variables defined in hiera:
+* `rip_server` -- an address where 'drip' daemon will send RIP announces.
 
-``` yaml
----
-private::drip::docker_networks: <networks>
-private::drip::rip_server: <IP address>
-```
-
-* `docker_networks` is a comma-separated list of docker network names
-(*NB:* not interface names!) that will be scanned for containers by 'drip'
-daemon.
-
-* `rip_server` is an address where 'drip' daemon will send RIP announces.
+* `rip_metric` -- a distance vector metric that will be sent for all containers.
 
 ## Testing
 
