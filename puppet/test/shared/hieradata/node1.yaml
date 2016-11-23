@@ -1,3 +1,4 @@
 ---
 classes:
   - roles::drip
+drip::advertise_addr: 172.16.20.12

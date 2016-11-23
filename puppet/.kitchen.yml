@@ -22,6 +22,7 @@ provisioner:
   puppetfile_path: Puppetfile
   puppet_debug: true
   puppet_verbose: true
+  custom_options: "-e 'include drip'"
 
 suites:
   - name: node1
@@ -31,7 +32,6 @@ suites:
       manifest: default.pp
       custom_facts:
         nodename: node1
-        next_hop_address: 172.16.20.12
     driver:
       network:
         - ["private_network", {ip: "172.16.20.12"}]
