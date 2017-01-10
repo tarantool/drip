@@ -326,6 +326,7 @@ def notify_rip(ip_lists, neighbor, route_tag,
               for i in xrange(0, len(ip_list), chunk_size)]
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('0.0.0.0', 520))
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     for chunk in chunks:
