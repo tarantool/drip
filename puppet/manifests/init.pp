@@ -13,15 +13,13 @@ class drip(
   validate_ip_address($advertise_addr)
   validate_integer($rip_metric)
 
-  include 'docker'
-
   $docker_networks_string = join($docker_networks, ' ')
 
-  docker::image { 'tarantool/drip':
+  ::docker::image { 'tarantool/drip':
     ensure    => 'present'
   }
 
-  docker::run { 'drip':
+  ::docker::run { 'drip':
     image            => 'tarantool/drip',
     privileged       => true,
     net              => 'host',

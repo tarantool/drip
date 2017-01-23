@@ -22,14 +22,14 @@ provisioner:
   puppetfile_path: Puppetfile
   puppet_debug: true
   puppet_verbose: true
-  custom_options: "-e 'include drip'"
+  custom_options: "-e 'include docker; include drip'"
 
 suites:
   - name: node1
     driver:
       vm_hostname: node1
     provisioner:
-      manifest: default.pp
+      manifest: init.pp
       custom_facts:
         nodename: node1
     driver:
