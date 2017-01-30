@@ -16,10 +16,12 @@ class drip(
   $docker_networks_string = join($docker_networks, ' ')
 
   ::docker::image { 'tarantool/drip':
-    ensure    => 'present'
+    ensure  => 'present',
+    require => Service['docker']
   }
 
   ::docker::run { 'drip':
+    require          => Service['docker'],
     image            => 'tarantool/drip',
     privileged       => true,
     net              => 'host',
